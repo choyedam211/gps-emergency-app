@@ -20,31 +20,68 @@ HTML = """
 body { font-family: system-ui, -apple-system, sans-serif; padding:16px; }
 button { font-size:18px; padding:12px 16px; margin-right:8px; }
 #log { margin-top:12px; white-space:pre-line; }
+#hospitals { margin-top:16px; }
 </style>
 </head>
 <body>
-<h2>📍 실시간 GPS 전송</h2>
+<h2>📍 실시간 GPS 전송 & 주변 응급실</h2>
 <p>아래 버튼 누른 뒤, <b>위치 권한</b>을 <b>허용</b>하세요.</p>
 <button id="startBtn">실시간 추적 시작</button>
 <button id="stopBtn" disabled>정지</button>
 <div id="log">대기 중…</div>
+<div id="hospitals"></div>
 <script>
 let watchId = null;
 function log(msg) { document.getElementById('log').textContent = msg; }
+
 function send(lat, lon, acc) {
-  fetch('/update', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({lat,lon,accuracy:acc})}).catch(e=>{});
+  fetch('/update', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({lat,lon,accuracy:acc})
+  }).catch(e=>{});
 }
+
+function fetchNearby() {
+  fetch('/nearby')
+    .then(r=>r.json())
+    .then(data=>{
+      const div = document.getElementById('hospitals');
+      if(!data.ok) {
+        div.innerHTML = '⚠️ 주변 응급실 정보 없음';
+        return;
+      }
+      let html = '<h3>🚑 주변 응급실 (예상 소요 빠른 순)</h3><ol>';
+      data.hospitals.forEach(h=>{
+        html += `<li>${h.name} | ${h.address} | 거리: ${h.distance}m | 예상 소요: ${h.time_min.toFixed(1)}분</li>`;
+      });
+      html += '</ol>';
+      div.innerHTML = html;
+    }).catch(e=>{
+      document.getElementById('hospitals').innerHTML = '❌ 주변 응급실 조회 실패';
+    });
+}
+
 document.getElementById('startBtn').onclick = () => {
   if(!navigator.geolocation){log('❌ GPS 미지원'); return;}
   document.getElementById('startBtn').disabled=true;
   document.getElementById('stopBtn').disabled=false;
   log('⏳ 위치 권한 요청 중…');
+
   watchId = navigator.geolocation.watchPosition(
-    pos => { const lat=pos.coords.latitude.toFixed(6); const lon=pos.coords.longitude.toFixed(6); const acc=Math.round(pos.coords.accuracy); log('✅ 전송됨 → 위도 '+lat+', 경도 '+lon+' (±'+acc+'m)'); send(lat,lon,acc); },
+    pos => {
+      const lat=pos.coords.latitude.toFixed(6);
+      const lon=pos.coords.longitude.toFixed(6);
+      const acc=Math.round(pos.coords.accuracy);
+      log('✅ 전송됨 → 위도 '+lat+', 경도 '+lon+' (±'+acc+'m)');
+      send(lat,lon,acc);
+      fetchNearby(); // 좌표 전송 후 주변 응급실 조회
+    },
     err => { log('❌ 실패: '+err.message); },
     {enableHighAccuracy:true, maximumAge:0, timeout:10000}
   );
 };
+
 document.getElementById('stopBtn').onclick = () => {
   if(watchId!==null){navigator.geolocation.clearWatch(watchId); watchId=null;}
   document.getElementById('startBtn').disabled=false;
