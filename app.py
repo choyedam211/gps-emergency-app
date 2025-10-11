@@ -1,13 +1,13 @@
 import os, time, random, requests
 from flask import Flask, request, render_template_string, jsonify
 
-# ===== 환경변수로 API 키 가져오기 =====
+# ===== 환경변수에서 API 키 가져오기 =====
 KAKAO_API_KEY = os.environ.get("KAKAO_API_KEY")
-PORT = int(os.environ.get("PORT", 5000))  # Render에서 자동 할당
+PORT = int(os.environ.get("PORT", 5000))  # Render에서 할당
 
 coords = {"lat": None, "lon": None, "accuracy": None, "ts": None}
 
-# ===== Flask 앱 설정 =====
+# ===== Flask 앱 =====
 app = Flask(__name__)
 
 HTML = """
