@@ -43,6 +43,8 @@ body { font-family: system-ui, -apple-system, sans-serif; padding:16px; }
 button { font-size:18px; padding:12px 16px; margin-right:8px; }
 #log { margin-top:12px; white-space:pre-line; }
 #hospitals { margin-top:16px; }
+#unavail { margin-top:12px; color:red; }
+#best { margin-top:12px; color:green; font-weight:bold; }
 </style>
 </head>
 <body>
@@ -51,7 +53,9 @@ button { font-size:18px; padding:12px 16px; margin-right:8px; }
 <button id="startBtn">실시간 추적 시작</button>
 <button id="stopBtn" disabled>정지</button>
 <div id="log">대기 중…</div>
+<div id="unavail"></div>
 <div id="hospitals"></div>
+<div id="best"></div>
 <script>
 let watchId = null;
 function log(msg) { document.getElementById('log').textContent = msg; }
@@ -68,23 +72,42 @@ function fetchNearby() {
   fetch('/nearby')
     .then(r=>r.json())
     .then(data=>{
-      const div = document.getElementById('hospitals');
+      const divH = document.getElementById('hospitals');
+      const divU = document.getElementById('unavail');
+      const divB = document.getElementById('best');
       if(!data.ok) {
-        div.innerHTML = '⚠️ 주변 응급실 정보 없음';
+        divH.innerHTML = '⚠️ 주변 응급실 정보 없음';
+        divU.innerHTML = '';
+        divB.innerHTML = '';
         return;
       }
-      let html = '<h3>🚑 주변 응급실 (응급 관련 키워드 포함, 소요시간 빠른 순)</h3><ol>';
-      data.hospitals.forEach((h,i)=>{
+
+      // 무작위 비가용 병원 표시
+      if(data.unavail.length > 0){
+        divU.innerHTML = `🚫 무작위 비가용 병원 (${data.unavail.length}개): ${data.unavail.join(', ')}`;
+      } else {
+        divU.innerHTML = '';
+      }
+
+      // 병원 리스트
+      let html = '<h3>🚑 주변 응급실 (소요시간 빠른 순)</h3><ol>';
+      data.hospitals.forEach(h=>{
         html += `<li>${h.name} | ${h.address} | 거리: ${h.distance_m}m | 예상 소요: ${h.weighted_time}분 | 상태: ${h.status}</li>`;
       });
       html += '</ol>';
+      divH.innerHTML = html;
+
+      // 최적 병원 표시
       if(data.best){
         const b = data.best;
-        html += `<p>🏆 최적 응급실: ${b.name} | ${b.address} | 거리: ${b.distance_m}m | 예상 소요: ${b.weighted_time}분</p>`;
+        divB.innerHTML = `🏆 최적 응급실: ${b.name} | ${b.address} | 거리: ${b.distance_m}m | 예상 소요: ${b.weighted_time}분`;
+      } else {
+        divB.innerHTML = '';
       }
-      div.innerHTML = html;
     }).catch(e=>{
       document.getElementById('hospitals').innerHTML = '❌ 주변 응급실 조회 실패';
+      document.getElementById('unavail').innerHTML = '';
+      document.getElementById('best').innerHTML = '';
     });
 }
 
