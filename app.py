@@ -1,18 +1,40 @@
 import os, time, threading, random, math, requests
 from flask import Flask, request, render_template_string, jsonify
+from pyngrok import ngrok, conf
 
 # ===== 환경변수에서 API 키 가져오기 =====
 KAKAO_API_KEY = os.environ.get("KAKAO_API_KEY")
-PORT = int(os.environ.get("PORT", 5000))  # Render에서 자동 할당
+NGROK_AUTHTOKEN = os.environ.get("NGROK_AUTHTOKEN")
+PORT = int(os.environ.get("PORT", 5010))
+
+# ===== ngrok v2 설정 =====
+conf.get_default().auth_token = NGROK_AUTHTOKEN
+try:
+    ngrok.kill()
+except:
+    pass
 
 coords = {"lat": None, "lon": None, "accuracy": None, "ts": None}
-hospitals_cache = []      # 전체 병원 정보 캐싱
-unavail_cache = []        # 무작위 비가용 병원 캐싱
-best_cache = None         # 최적 병원 캐싱
+hospitals_cache = []  # 전체 병원 정보 캐싱
+unavail_cache = []    # 무작위 비가용 병원 캐싱
+best_cache = None     # 최적 병원 캐싱
 
 # ===== 가중치 =====
 WEIGHT_NARROW = 0.3
 WEIGHT_ALLEY = 0.5
+A_STAR_WEIGHT = 0.7
+GA_WEIGHT = 0.3
+
+# ===================== HELPER =====================
+def compute_weighted_time(distance_m, road_name=""):
+    """거리 기반 시간 계산 + 골목/좁은길 가중치"""
+    time_min = distance_m / (45_000 / 60)
+    penalty = 0
+    if any(k in road_name for k in ["골목", "이면", "소로"]):
+        penalty += WEIGHT_ALLEY
+    elif "좁" in road_name:
+        penalty += WEIGHT_NARROW
+    return time_min * (1 + penalty)
 
 def assign_random_availability(hospitals, max_unavail_frac=0.5):
     """일부 병원을 무작위로 비가용 처리 (한번 설정 후 캐시)"""
@@ -30,17 +52,33 @@ def assign_random_availability(hospitals, max_unavail_frac=0.5):
     for h in hospitals:
         h["available"] = (h["name"] not in unavail_cache)
 
-def compute_weighted_time(distance_m, road_name=""):
-    """거리 기반 시간 계산 + 골목/좁은길 가중치"""
-    time_min = distance_m / (45_000 / 60)
-    penalty = 0
-    if any(k in road_name for k in ["골목", "이면", "소로"]):
-        penalty += WEIGHT_ALLEY
-    elif "좁" in road_name:
-        penalty += WEIGHT_NARROW
-    return time_min * (1 + penalty)
+def select_best_GA(hospitals, pop_size=10, gens=5, mutation_rate=0.2):
+    """GA 후보 선택 (출력 생략)"""
+    available_indices = [i for i,h in enumerate(hospitals) if h.get("available",True)]
+    if not available_indices: return None
+    n = len(available_indices)
+    population = [random.sample(available_indices,n) for _ in range(pop_size)]
+    def fitness(ch):
+        first_idx = ch[0]
+        first = hospitals[first_idx]
+        if first.get("weighted_time",math.inf)==math.inf: return 0
+        return 1 / (first["weighted_time"] + 1)
+    for _ in range(gens):
+        population.sort(key=fitness,reverse=True)
+        next_gen = population[:2]
+        while len(next_gen)<pop_size:
+            p1,p2=random.sample(population[:max(2,pop_size//2)],2)
+            cut=random.randint(1,n-1)
+            child = p1[:cut]+[c for c in p2 if c not in p1[:cut]]
+            if random.random()<mutation_rate and len(child)>=2:
+                i,j=random.sample(range(len(child)),2)
+                child[i],child[j]=child[j],child[i]
+            next_gen.append(child)
+        population = next_gen
+    best_ch = max(population,key=fitness)
+    return hospitals[best_ch[0]]
 
-# ===== Flask 앱 =====
+# ===================== Flask 앱 =====================
 app = Flask(__name__)
 HTML = """
 <!doctype html>
@@ -131,8 +169,7 @@ document.getElementById('stopBtn').onclick = () => {
 """
 
 @app.route("/")
-def index():
-    return render_template_string(HTML)
+def index(): return render_template_string(HTML)
 
 @app.route("/update", methods=["POST"])
 def update():
@@ -173,8 +210,8 @@ def nearby():
         except Exception as e:
             return jsonify(ok=False,error=f"API 호출 실패: {str(e)}")
 
-        exclude_keywords = ["동물", "치과", "한의원", "약국", "떡볶이", "카페", "편의점", "이송", "은행", "의원"]
-        include_keywords = ["응급", "응급실", "응급의료", "의료센터", "병원", "대학병원", "응급센터", "응급의료센터"]
+        exclude_keywords = ["동물","치과","한의원","약국","떡볶이","카페","편의점","이송","은행","의원"]
+        include_keywords = ["응급","응급실","응급의료","의료센터","병원","대학병원","응급센터","응급의료센터"]
 
         for d in docs:
             name = d.get("place_name")
@@ -184,25 +221,30 @@ def nearby():
             hospitals_cache.append({
                 "name": name,
                 "address": d.get("road_address_name") or d.get("address_name",""),
-                "distance_m": float(d.get("distance", 0)),
+                "distance_m": float(d.get("distance",0)),
                 "road_name": d.get("road_address_name","")
             })
 
         if not hospitals_cache:
             return jsonify(ok=False,error="응급실 없음")
 
-        assign_random_availability(hospitals_cache, 0.5)
+        assign_random_availability(hospitals_cache,0.5)
 
+        # A* 계산 + GA 하이브리드
+        best_GA = select_best_GA(hospitals_cache)
         for h in hospitals_cache:
             if h["available"]:
                 h["weighted_time"] = compute_weighted_time(h["distance_m"], h["road_name"])
+                ga_factor = 0.8 if best_GA and h["name"]==best_GA["name"] else 1.0
+                h["final_score"] = h["weighted_time"] * (A_STAR_WEIGHT*ga_factor + GA_WEIGHT)
                 h["status"] = "가용"
             else:
                 h["weighted_time"] = math.inf
+                h["final_score"] = math.inf
                 h["status"] = "비가용"
 
         avail = [h for h in hospitals_cache if h["available"]]
-        best_cache = min(avail, key=lambda x: x["weighted_time"]) if avail else None
+        best_cache = min(avail,key=lambda x:x["final_score"]) if avail else None
 
     hospitals_out = [{
         "name": h["name"],
@@ -210,7 +252,7 @@ def nearby():
         "distance": int(h["distance_m"]),
         "time_min": h["weighted_time"],
         "status": h["status"]
-    } for h in sorted(hospitals_cache, key=lambda x: x["weighted_time"])[:10]]
+    } for h in sorted(hospitals_cache,key=lambda x:x["weighted_time"])[:10]]
 
     best_out = {
         "name": best_cache["name"],
@@ -219,7 +261,7 @@ def nearby():
         "time_min": best_cache["weighted_time"]
     } if best_cache else None
 
-    return jsonify(ok=True, hospitals=hospitals_out, best=best_out, unavail=unavail_cache)
+    return jsonify(ok=True,hospitals=hospitals_out,best=best_out,unavail=unavail_cache)
 
-if __name__ == "__main__":
+if __name__=="__main__":
     app.run(host="0.0.0.0", port=PORT)
