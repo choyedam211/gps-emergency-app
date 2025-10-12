@@ -1,18 +1,9 @@
-import os, time, threading, random, math, requests
+import os, time, random, math, requests
 from flask import Flask, request, render_template_string, jsonify
-from pyngrok import ngrok, conf
 
 # ===== 환경변수에서 API 키 가져오기 =====
 KAKAO_API_KEY = os.environ.get("KAKAO_API_KEY")
-NGROK_AUTHTOKEN = os.environ.get("NGROK_AUTHTOKEN")
 PORT = int(os.environ.get("PORT", 5010))
-
-# ===== ngrok v2 설정 =====
-conf.get_default().auth_token = NGROK_AUTHTOKEN
-try:
-    ngrok.kill()
-except:
-    pass
 
 coords = {"lat": None, "lon": None, "accuracy": None, "ts": None}
 hospitals_cache = []  # 전체 병원 정보 캐싱
@@ -191,7 +182,6 @@ def nearby():
     if not KAKAO_API_KEY:
         return jsonify(ok=False,error="KAKAO_API_KEY 미설정")
 
-    # 한 번만 API 호출
     if not hospitals_cache:
         url_local = "https://dapi.kakao.com/v2/local/search/keyword.json"
         headers = {"Authorization": f"KakaoAK {KAKAO_API_KEY}"}
@@ -230,7 +220,6 @@ def nearby():
 
         assign_random_availability(hospitals_cache,0.5)
 
-        # A* 계산 + GA 하이브리드
         best_GA = select_best_GA(hospitals_cache)
         for h in hospitals_cache:
             if h["available"]:
