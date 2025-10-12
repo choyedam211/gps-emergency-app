@@ -3,7 +3,7 @@ from flask import Flask, request, render_template_string, jsonify
 
 # ===== 환경변수에서 API 키 가져오기 =====
 KAKAO_API_KEY = os.environ.get("KAKAO_API_KEY")
-PORT = int(os.environ.get("PORT", 5000))  # Render에서 할당
+PORT = int(os.environ.get("PORT", 5000))  # Render 등에서 할당
 
 coords = {"lat": None, "lon": None, "accuracy": None, "ts": None}
 
@@ -129,22 +129,31 @@ def nearby():
 
     hospitals = []
     exclude_keywords = ["동물", "치과", "한의원", "약국", "떡볶이", "카페", "편의점", "이송", "은행", "의원"]
+    include_keywords = ["응급", "응급실", "응급의료", "의료센터", "병원", "대학병원", "응급센터", "응급의료센터"]
 
     for doc in result_local.get("documents", []):
         name = doc["place_name"]
-        if any(k.lower() in name.lower() for k in exclude_keywords):
-            continue
         address = doc.get("road_address_name") or doc.get("address_name")
         distance = int(doc.get("distance", 0))
+
+        # 제외 키워드 체크
+        if any(k.lower() in name.lower() for k in exclude_keywords):
+            continue
+        # 포함 키워드 체크: 하나라도 포함되어야 통과
+        if not any(k.lower() in name.lower() for k in include_keywords):
+            continue
+
         speed_kmh = random.uniform(40,50)
         speed_m_per_s = speed_kmh * 1000 / 3600
         estimated_time_min = distance / speed_m_per_s / 60
+
         hospitals.append({
             "name": name,
             "address": address,
             "distance": distance,
             "time_min": estimated_time_min
         })
+
     hospitals.sort(key=lambda x: x["time_min"])
     return jsonify(ok=True, hospitals=hospitals[:10])
 
