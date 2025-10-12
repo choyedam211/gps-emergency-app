@@ -1,41 +1,37 @@
-# ======================================
-# 🚑 실시간 GPS + 카카오 API 응급실 탐색 (app.py)
-# ✅ 무작위 비가용 병원 반영 + 최적 병원 표시
-# ======================================
-
-import os, time, random, math, requests
+import os, time, threading, random, math, requests
 from flask import Flask, request, render_template_string, jsonify
 
 # ===== 환경변수에서 API 키 가져오기 =====
 KAKAO_API_KEY = os.environ.get("KAKAO_API_KEY")
-PORT = int(os.environ.get("PORT", 5000))  # Render에서 할당
+PORT = int(os.environ.get("PORT", 5000))  # Render에서 자동 할당
 
 coords = {"lat": None, "lon": None, "accuracy": None, "ts": None}
-hospitals_state = None  # 무작위 비가용 병원 고정 저장
+hospitals_cache = []      # 전체 병원 정보 캐싱
+unavail_cache = []        # 무작위 비가용 병원 캐싱
+best_cache = None         # 최적 병원 캐싱
 
-# ===== Helper =====
+# ===== 가중치 =====
 WEIGHT_NARROW = 0.3
 WEIGHT_ALLEY = 0.5
 
 def assign_random_availability(hospitals, max_unavail_frac=0.5):
-    global hospitals_state
-    if hospitals_state is not None:
-        return hospitals_state
+    """일부 병원을 무작위로 비가용 처리 (한번 설정 후 캐시)"""
+    global unavail_cache
+    if unavail_cache:
+        for h in hospitals:
+            h["available"] = (h["name"] not in unavail_cache)
+        return
+
     frac = random.uniform(0, max_unavail_frac)
     num_unavail = int(len(hospitals) * frac)
     unavail = random.sample(hospitals, num_unavail) if num_unavail else []
-    unavail_names = []
+    unavail_cache = [h["name"] for h in unavail]
+
     for h in hospitals:
-        if h in unavail:
-            h["available"] = False
-            unavail_names.append(h["name"])
-        else:
-            h["available"] = True
-    hospitals_state = (frac, unavail_names)
-    return hospitals_state
+        h["available"] = (h["name"] not in unavail_cache)
 
 def compute_weighted_time(distance_m, road_name=""):
-    """거리 기반 시간 계산 (평균 45km/h) + 골목 가중치"""
+    """거리 기반 시간 계산 + 골목/좁은길 가중치"""
     time_min = distance_m / (45_000 / 60)
     penalty = 0
     if any(k in road_name for k in ["골목", "이면", "소로"]):
@@ -87,17 +83,15 @@ function fetchNearby() {
         div.innerHTML = '⚠️ 주변 응급실 정보 없음';
         return;
       }
-      let html = '';
-      if(data.unavail && data.unavail.length>0){
-          html += '🚫 비가용 병원: ' + data.unavail.join(', ') + '<br><br>';
-      }
-      html += '<h3>🚑 주변 응급실 (응급 관련 키워드 포함, 소요시간 빠른 순)</h3><ol>';
+      let html = `<h3>🚑 주변 응급실 (예상 소요 빠른 순)</h3>`;
+      html += `<p>🚫 비가용 병원: ${data.unavail.join(', ')}</p>`;
+      html += '<ol>';
       data.hospitals.forEach(h=>{
         html += `<li>${h.name} | ${h.address} | 거리: ${h.distance}m | 예상 소요: ${h.time_min.toFixed(1)}분 | 상태: ${h.status}</li>`;
       });
       html += '</ol>';
       if(data.best){
-          html += `<br>🏆 최적의 응급실: ${data.best.name} | ${data.best.address} | 거리: ${data.best.distance}m | 예상 소요: ${data.best.time_min.toFixed(1)}분`;
+        html += `<p>🏆 최적 병원: ${data.best.name} | ${data.best.address} | 거리: ${data.best.distance}m | 예상 소요: ${data.best.time_min:.1f}분</p>`;
       }
       div.innerHTML = html;
     }).catch(e=>{
@@ -113,12 +107,12 @@ document.getElementById('startBtn').onclick = () => {
 
   watchId = navigator.geolocation.watchPosition(
     pos => {
-      const lat=pos.coords.latitude;
-      const lon=pos.coords.longitude;
+      const lat=pos.coords.latitude.toFixed(6);
+      const lon=pos.coords.longitude.toFixed(6);
       const acc=Math.round(pos.coords.accuracy);
       log('✅ 전송됨 → 위도 '+lat+', 경도 '+lon+' (±'+acc+'m)');
       send(lat,lon,acc);
-      fetchNearby(); // 좌표 전송 후 주변 응급실 조회
+      fetchNearby();
     },
     err => { log('❌ 실패: '+err.message); },
     {enableHighAccuracy:true, maximumAge:0, timeout:10000}
@@ -154,83 +148,78 @@ def update():
 
 @app.route("/nearby")
 def nearby():
-    if coords["lat"] is None:
+    global hospitals_cache, best_cache
+    if coords["lat"] is None or coords["lon"] is None:
         return jsonify(ok=False,error="좌표 없음")
-    
-    url_local = "https://dapi.kakao.com/v2/local/search/keyword.json"
-    headers = {"Authorization": f"KakaoAK {KAKAO_API_KEY}"}
-    params_local = {
-        "query": "응급실",
-        "x": coords["lon"],
-        "y": coords["lat"],
-        "radius": 10000,
-        "size": 15,
-        "sort": "distance"
-    }
+    if not KAKAO_API_KEY:
+        return jsonify(ok=False,error="KAKAO_API_KEY 미설정")
 
-    try:
-        response_local = requests.get(url_local, headers=headers, params=params_local, timeout=5)
-        result_local = response_local.json()
-    except:
-        return jsonify(ok=False,error="API 호출 실패")
-
-    exclude_keywords = ["동물", "치과", "한의원", "약국", "떡볶이", "카페", "편의점", "이송", "은행", "의원"]
-    include_keywords = ["응급", "응급실", "응급의료", "의료센터", "병원", "대학병원", "응급센터", "응급의료센터"]
-
-    hospitals = []
-    for doc in result_local.get("documents", []):
-        name = doc["place_name"]
-        if any(x.lower() in name.lower() for x in exclude_keywords):
-            continue
-        if not any(x.lower() in name.lower() for x in include_keywords):
-            continue
-        hospitals.append({
-            "name": name,
-            "address": doc.get("road_address_name") or doc.get("address_name",""),
-            "distance_m": float(doc.get("distance",0)),
-            "road_name": doc.get("road_address_name","")
-        })
-
-    if not hospitals:
-        return jsonify(ok=False,error="응급실 없음")
-
-    # 🚫 무작위 비가용 병원 적용
-    frac, unavail = assign_random_availability(hospitals, 0.5)
-
-    # 🧮 소요 시간 계산 및 상태
-    for h in hospitals:
-        if h["available"]:
-            h["weighted_time"] = compute_weighted_time(h["distance_m"], h["road_name"])
-            h["status"] = "가용"
-        else:
-            h["weighted_time"] = math.inf
-            h["status"] = "비가용"
-
-    avail = [h for h in hospitals if h["available"]]
-    best = min(avail, key=lambda x: x["weighted_time"]) if avail else None
-
-    # 정렬 및 출력
-    hospitals_sorted = sorted(hospitals, key=lambda x: x["weighted_time"])
-    hospitals_out = []
-    for h in hospitals_sorted[:10]:
-        hospitals_out.append({
-            "name": h["name"],
-            "address": h["address"],
-            "distance": int(h["distance_m"]),
-            "time_min": h["weighted_time"],
-            "status": h["status"]
-        })
-
-    best_out = None
-    if best:
-        best_out = {
-            "name": best["name"],
-            "address": best["address"],
-            "distance": int(best["distance_m"]),
-            "time_min": best["weighted_time"]
+    # 한 번만 API 호출
+    if not hospitals_cache:
+        url_local = "https://dapi.kakao.com/v2/local/search/keyword.json"
+        headers = {"Authorization": f"KakaoAK {KAKAO_API_KEY}"}
+        params_local = {
+            "query": "응급실",
+            "x": coords["lon"],
+            "y": coords["lat"],
+            "radius": 10000,
+            "size": 15,
+            "sort": "distance"
         }
+        try:
+            response_local = requests.get(url_local, headers=headers, params=params_local, timeout=5)
+            response_local.raise_for_status()
+            docs = response_local.json().get("documents", [])
+        except Exception as e:
+            return jsonify(ok=False,error=f"API 호출 실패: {str(e)}")
 
-    return jsonify(ok=True, hospitals=hospitals_out, best=best_out, unavail=unavail)
+        exclude_keywords = ["동물", "치과", "한의원", "약국", "떡볶이", "카페", "편의점", "이송", "은행", "의원"]
+        include_keywords = ["응급", "응급실", "응급의료", "의료센터", "병원", "대학병원", "응급센터", "응급의료센터"]
+
+        for d in docs:
+            name = d.get("place_name")
+            if not name: continue
+            if any(x in name for x in exclude_keywords): continue
+            if not any(x in name for x in include_keywords): continue
+            hospitals_cache.append({
+                "name": name,
+                "address": d.get("road_address_name") or d.get("address_name",""),
+                "distance_m": float(d.get("distance", 0)),
+                "road_name": d.get("road_address_name","")
+            })
+
+        if not hospitals_cache:
+            return jsonify(ok=False,error="응급실 없음")
+
+        assign_random_availability(hospitals_cache, 0.5)
+
+        for h in hospitals_cache:
+            if h["available"]:
+                h["weighted_time"] = compute_weighted_time(h["distance_m"], h["road_name"])
+                h["status"] = "가용"
+            else:
+                h["weighted_time"] = math.inf
+                h["status"] = "비가용"
+
+        avail = [h for h in hospitals_cache if h["available"]]
+        best_cache = min(avail, key=lambda x: x["weighted_time"]) if avail else None
+
+    hospitals_out = [{
+        "name": h["name"],
+        "address": h["address"],
+        "distance": int(h["distance_m"]),
+        "time_min": h["weighted_time"],
+        "status": h["status"]
+    } for h in sorted(hospitals_cache, key=lambda x: x["weighted_time"])[:10]]
+
+    best_out = {
+        "name": best_cache["name"],
+        "address": best_cache["address"],
+        "distance": int(best_cache["distance_m"]),
+        "time_min": best_cache["weighted_time"]
+    } if best_cache else None
+
+    return jsonify(ok=True, hospitals=hospitals_out, best=best_out, unavail=unavail_cache)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT)
