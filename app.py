@@ -1,20 +1,21 @@
-# ================================================# ================================================
+# ============================================================
 # 🚑 Ambulance Route Optimization (Hybrid: A* 70% + GA 30%)
 # ✅ 실시간 GPS + 카카오 API
-# ✅ GA 후보 출력 생략, 병원 번호 표시
-# ✅ ngrok 사용하지 않음 (app.py 실행 가능)
-# ✅ 매번 새롭게 비가용 병원 랜덤 지정
-# ================================================
+# ✅ 비가용 병원 무작위 1회만 지정 (세션 유지)
+# ✅ 병원 번호 표시, GA 후보 출력 생략
+# ✅ ngrok 미사용 / app.py 단독 실행 가능
+# ============================================================
 
 import os, time, random, math, requests
 from flask import Flask, request, render_template_string, jsonify
 
 # ===== 환경변수에서 API 키 가져오기 =====
-KAKAO_API_KEY = os.environ.get("KAKAO_API_KEY")  # ex) export KAKAO_API_KEY='키'
+KAKAO_API_KEY = os.environ.get("KAKAO_API_KEY")  # export KAKAO_API_KEY="REST_API_KEY"
 PORT = int(os.environ.get("PORT", 5000))
 
 # ===== 전역 변수 =====
 coords = {"lat": None, "lon": None, "accuracy": None, "ts": None}
+cached_unavail = None  # ✅ 한 번 정한 비가용 병원 유지용
 
 # ===== 가중치 =====
 WEIGHT_NARROW = 0.3
@@ -35,13 +36,22 @@ def compute_weighted_time(distance_m, road_name=""):
 
 def assign_random_availability(hospitals, max_unavail_frac=0.4):
     """일부 병원을 무작위로 비가용 처리"""
-    frac = random.uniform(0, max_unavail_frac)
+    global cached_unavail
+    # ✅ 이미 한번 지정된 비가용 병원이 있으면 그대로 유지
+    if cached_unavail is not None:
+        for h in hospitals:
+            h["available"] = h["name"] not in cached_unavail
+            h["status"] = "가용" if h["available"] else "비가용"
+        return cached_unavail
+
+    # ✅ 처음 한 번만 무작위로 선택
+    frac = random.uniform(0.2, max_unavail_frac)
     num_unavail = int(len(hospitals) * frac)
-    unavail = random.sample(hospitals, num_unavail) if num_unavail else []
+    cached_unavail = random.sample([h["name"] for h in hospitals], num_unavail) if num_unavail else []
     for h in hospitals:
-        h["available"] = h not in unavail
+        h["available"] = h["name"] not in cached_unavail
         h["status"] = "가용" if h["available"] else "비가용"
-    return [h["name"] for h in unavail]
+    return cached_unavail
 
 def select_best_GA(hospitals, pop_size=10, gens=5, mutation_rate=0.2):
     """GA 방식으로 최적 후보 선택 (출력 생략)"""
@@ -108,11 +118,11 @@ function fetchNearby(){
     html += '<p>🚫 비가용 병원: ' + (data.unavail.length ? data.unavail.join(', ') : '없음') + '</p>';
     html += '<ol>';
     data.hospitals.forEach((h,i)=>{
-      html += `<li>${i+1}. ${h.name} | ${h.address} | 거리: ${h.distance}m | 예상 소요: ${h.time_min.toFixed(1)}분 | 상태: ${h.status}</li>`;
+      html += `<li>${i+1}. ${h.name} | 거리: ${h.distance}m | ${h.time_min.toFixed(1)}분 | ${h.status}</li>`;
     });
     html += '</ol>';
     if(data.best){
-      html += `<p>🏆 최적 병원: ${data.best.name} (${data.best.distance}m, ${data.best.time_min.toFixed(1)}분)</p>`;
+      html += `<p>🏥 최적 병원: ${data.best.name} (${data.best.time_min.toFixed(1)}분)</p>`;
     }
     div.innerHTML = html;
   }).catch(e=>{
@@ -188,8 +198,8 @@ def nearby():
     except Exception as e:
         return jsonify(ok=False, error=f"API 호출 실패: {e}")
 
-     exclude_keywords = ["동물","치과","한의원","약국","떡볶이","카페","편의점","이송","은행","의원"]
-     include_keywords = ["응급","응급실","응급의료","의료센터","병원","대학병원","응급센터","응급의료센터"]
+    exclude_keywords = ["동물","치과","한의원","약국","떡볶이","카페","편의점","이송","은행","의원"]
+    include_keywords = ["응급","응급실","응급의료","의료센터","병원","대학병원","응급센터","응급의료센터"]
 
     hospitals = []
     for d in docs:
@@ -210,22 +220,17 @@ def nearby():
     if not hospitals:
         return jsonify(ok=False, error="응급실 없음")
 
-    unavail_list = assign_random_availability(hospitals, 0.5)
+    # ✅ 비가용 병원은 한 번만 랜덤 선택
+    unavail_list = assign_random_availability(hospitals, 0.4)
 
     for h in hospitals:
-        if h["available"]:
-            h["weighted_time"] = compute_weighted_time(h["distance_m"], h["road_name"])
-        else:
-            h["weighted_time"] = math.inf
+        h["weighted_time"] = compute_weighted_time(h["distance_m"], h["road_name"]) if h["available"] else math.inf
 
     best_a_star = min((h for h in hospitals if h["available"]), key=lambda x: x["weighted_time"], default=None)
     best_ga = select_best_GA(hospitals)
     best_final = None
     if best_a_star and best_ga:
-        if random.random() < A_STAR_WEIGHT:
-            best_final = best_a_star
-        else:
-            best_final = best_ga
+        best_final = best_a_star if random.random() < A_STAR_WEIGHT else best_ga
     else:
         best_final = best_a_star or best_ga
 
@@ -251,6 +256,3 @@ def nearby():
 # ===================== Flask 실행 =====================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT)
-
-
-
