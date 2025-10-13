@@ -188,8 +188,8 @@ def nearby():
     except Exception as e:
         return jsonify(ok=False, error=f"API 호출 실패: {e}")
 
-    exclude_keywords = ["동물", "치과", "한의원", "약국", "편의점", "카페"]
-    include_keywords = ["응급", "병원", "의료", "응급의료", "응급센터", "의료센터"]
+     exclude_keywords = ["동물","치과","한의원","약국","떡볶이","카페","편의점","이송","은행","의원"]
+     include_keywords = ["응급","응급실","응급의료","의료센터","병원","대학병원","응급센터","응급의료센터"]
 
     hospitals = []
     for d in docs:
@@ -251,5 +251,6 @@ def nearby():
 # ===================== Flask 실행 =====================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT)
+
 
 
